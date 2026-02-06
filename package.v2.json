@@ -613,5 +613,17 @@
       "v1.4.2": "适配MoviePilot v2.8.8+",
       "v1.4.1": "MoviePilot V2 版本登录壁纸本地化插件"
     }
+  },
+  "NotionMediaSync": {
+    "name": "Notion媒体同步",
+    "description": "媒体整理完成后自动录入Notion数据库。",
+    "labels": "工具,同步",
+    "version": "1.0.0",
+    "icon": "https://www.notion.so/images/favicon.ico",
+    "author": "media-library-manager",
+    "level": 1,
+    "history": {
+      "v1.0.0": "首个版本，支持媒体整理完成后自动同步到Notion"
+    }
   }
 }
