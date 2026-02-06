@@ -3,11 +3,12 @@
     "name": "Notion媒体同步",
     "description": "媒体整理完成后自动录入Notion数据库。",
     "labels": "工具,同步",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://www.notion.so/images/favicon.ico",
     "author": "cnxin",
     "level": 1,
     "history": {
+      "v1.0.1": "修复 Notion API 2025-09-03 兼容性问题，支持 data_sources API；自动过滤数据库中不存在的字段",
       "v1.0.0": "首个版本，支持媒体整理完成后自动同步到Notion"
     }
   }
