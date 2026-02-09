@@ -69,6 +69,56 @@ class NotionClient:
 
         return self._db_properties
 
+    # 必需属性定义 - 用于自动创建缺失的数据库属性
+    REQUIRED_PROPERTIES = {
+        "分辨率": {"select": {"options": []}},
+        "视频编码": {"rich_text": {}},
+        "音频格式": {"rich_text": {}},
+        "来源": {"select": {"options": []}},
+        "发布组": {"rich_text": {}},
+        "季数": {"number": {}},
+        "集数": {"rich_text": {}},
+    }
+
+    def ensure_properties(self) -> bool:
+        """
+        确保数据库包含所有必需属性
+
+        Returns:
+            True 如果所有属性就绪，False 如果有失败
+        """
+        try:
+            # 获取当前数据库属性
+            db_props = self._get_database_properties()
+
+            # 找出缺失的属性
+            missing = {}
+            for name, config in self.REQUIRED_PROPERTIES.items():
+                if name not in db_props:
+                    missing[name] = config
+
+            if not missing:
+                logger.info("所有必需属性已存在")
+                return True
+
+            # 创建缺失属性
+            logger.info(f"创建缺失属性: {list(missing.keys())}")
+            self.client.databases.update(
+                database_id=self.database_id,
+                properties=missing
+            )
+
+            # 刷新属性缓存
+            self._db_properties = None
+            self._get_database_properties()
+
+            logger.info("缺失属性创建成功")
+            return True
+
+        except Exception as e:
+            logger.warning(f"属性创建失败: {str(e)}")
+            return False
+
     def _filter_properties(self, properties: Dict) -> Dict:
         """
         过滤掉数据库中不存在的属性
@@ -266,9 +316,11 @@ class NotionClient:
                 'tv_series': '剧集',
                 'anime': '动画',
                 '电影': '电影',
-                '电视剧': '剧集'
+                '电视剧': '剧集',
+                '动画电影': '动画电影',
+                '动画剧集': '动画剧集'
             }
-            type_name = type_mapping.get(str(media_type).lower(), '其他')
+            type_name = type_mapping.get(str(media_type).lower(), media_type)
             properties['类型'] = {'select': {'name': type_name}}
 
         # 年份
@@ -285,10 +337,9 @@ class NotionClient:
             except (ValueError, TypeError):
                 pass
 
-        # 集数（总集数）- 支持 number 和 rich_text 两种类型
-        episodes = media_data.get('total_episodes') or media_data.get('number_of_episodes')
+        # 集数 - 支持多种来源
+        episodes = media_data.get('episode') or media_data.get('total_episodes') or media_data.get('number_of_episodes')
         if episodes:
-            # 转换为字符串以支持 rich_text 类型
             properties['集数'] = {
                 'rich_text': [{'text': {'content': str(episodes)}}]
             }
@@ -352,16 +403,16 @@ class NotionClient:
                 'rich_text': [{'text': {'content': summary}}]
             }
 
-        # 数据源（使用 api_source 字段，避免与视频来源冲突）
-        api_source = media_data.get('api_source') or media_data.get('source')
-        if api_source:
+        # 数据源
+        data_source = media_data.get('data_source') or media_data.get('api_source')
+        if data_source:
             source_mapping = {
                 'tmdb': 'TMDB',
                 'bangumi': 'Bangumi',
                 'TMDB': 'TMDB',
                 'Bangumi': 'Bangumi'
             }
-            source_name = source_mapping.get(api_source)
+            source_name = source_mapping.get(data_source)
             if source_name:
                 properties['数据源'] = {'select': {'name': source_name}}
 

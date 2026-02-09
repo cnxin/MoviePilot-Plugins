@@ -4,6 +4,7 @@
 """
 
 import datetime
+import threading
 from typing import Any, List, Dict, Tuple, Optional
 
 from app import schemas
@@ -11,7 +12,7 @@ from app.core.config import settings
 from app.core.event import eventmanager, Event
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas.types import EventType
+from app.schemas.types import EventType, MediaType
 
 from .notion_client import NotionClient
 
@@ -24,7 +25,7 @@ class NotionMediaSync(_PluginBase):
     # 插件图标
     plugin_icon = "https://www.notion.so/images/favicon.ico"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "2.3.0"
     # 插件作者
     plugin_author = "media-library-manager"
     # 作者主页
@@ -38,6 +39,8 @@ class NotionMediaSync(_PluginBase):
 
     # 私有变量
     _notion_client: Optional[NotionClient] = None
+    # 线程锁：防止并发同步同一媒体
+    _sync_lock: threading.Lock = threading.Lock()
 
     # 配置属性
     _enabled: bool = False
@@ -66,6 +69,9 @@ class NotionMediaSync(_PluginBase):
                     token=self._notion_token,
                     database_id=self._database_id
                 )
+                # 确保数据库属性存在
+                if self._notion_client:
+                    self._notion_client.ensure_properties()
                 logger.info("Notion媒体同步插件初始化成功")
             except Exception as e:
                 logger.error(f"Notion客户端初始化失败: {str(e)}")
@@ -108,6 +114,12 @@ class NotionMediaSync(_PluginBase):
                 "endpoint": self.test_connection,
                 "methods": ["GET"],
                 "summary": "测试Notion连接"
+            },
+            {
+                "path": "/clear_synced_keys",
+                "endpoint": self.clear_synced_keys,
+                "methods": ["GET"],
+                "summary": "清空同步去重记录"
             }
         ]
 
@@ -268,7 +280,9 @@ class NotionMediaSync(_PluginBase):
                                                     '3. 数据库需包含以下属性：标题(title)、原始标题(rich_text)、'
                                                     '类型(select)、年份(number)、评分(number)、封面(files)、简介(rich_text)、'
                                                     'TMDB ID(rich_text)、数据源(select)\n'
-                                                    '4. 可选属性：季数(number)、集数(rich_text)'
+                                                    '4. 可选属性：季数(number)、集数(rich_text)、分辨率(select)、'
+                                                    '视频编码(rich_text)、音频格式(rich_text)、来源(select)、发布组(rich_text)\n'
+                                                    '5. 类型字段支持：电影、剧集、动画电影、动画剧集（根据 TMDB 类型自动识别）'
                                         }
                                     }
                                 ]
@@ -454,6 +468,27 @@ class NotionMediaSync(_PluginBase):
         except Exception as e:
             return schemas.Response(success=False, message=f"连接失败: {str(e)}")
 
+    def clear_synced_keys(self, apikey: str):
+        """
+        清空同步去重记录
+        """
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+
+        try:
+            # 获取当前记录数量
+            synced_keys = self.get_data('synced_keys') or {}
+            count = len(synced_keys)
+
+            # 清空同步记录
+            self.save_data('synced_keys', {})
+
+            logger.info(f"已清空 {count} 条同步去重记录")
+            return schemas.Response(success=True, message=f"已清空 {count} 条同步去重记录")
+        except Exception as e:
+            logger.error(f"清空同步记录失败: {str(e)}")
+            return schemas.Response(success=False, message=f"清空失败: {str(e)}")
+
     def stop_service(self):
         """
         退出插件
@@ -475,6 +510,7 @@ class NotionMediaSync(_PluginBase):
         # 获取媒体信息
         mediainfo = event_data.get("mediainfo")
         transferinfo = event_data.get("transferinfo")
+        meta = event_data.get("meta")
 
         if not mediainfo:
             logger.warning("TransferComplete 事件缺少 mediainfo")
@@ -486,41 +522,71 @@ class NotionMediaSync(_PluginBase):
             logger.info(f"跳过媒体类型 {media_type}: {mediainfo.title}")
             return
 
-        # 构建媒体数据
-        media_data = self._build_media_data(mediainfo, transferinfo)
-        title = media_data.get('title', '未知')
+        # 生成唯一标识：TMDB ID + 季数（用于去重）
+        tmdb_id = getattr(mediainfo, 'tmdb_id', None)
+        season = getattr(meta, 'begin_season', None) if meta else None
+        unique_key = f"{tmdb_id}_{season}" if tmdb_id else None
 
-        logger.info(f"开始同步到 Notion: {title}")
-
-        # 检查重复
-        if self._skip_existing:
-            existing = self._notion_client.check_duplicate(title)
-            if existing:
-                logger.info(f"跳过已存在条目: {title}")
-                self._save_history(media_data, None, "skipped")
+        # 使用线程锁防止并发同步同一媒体
+        with self._sync_lock:
+            # 持久化去重：检查是否已同步过此媒体（在锁内读取，确保数据一致性）
+            synced_keys: Dict[str, str] = self.get_data('synced_keys') or {}
+            if unique_key and unique_key in synced_keys:
+                logger.debug(f"已同步过，跳过: {mediainfo.title} (key={unique_key})")
                 return
 
-        # 构建 Notion 属性
-        properties = NotionClient.build_properties(media_data)
+            # 构建媒体数据
+            media_data = self._build_media_data(mediainfo, transferinfo, meta)
+            title = media_data.get('title', '未知')
 
-        # 创建 Notion 页面
-        page_id = self._notion_client.create_page(properties)
+            logger.info(f"开始同步到 Notion: {title}")
 
-        if page_id:
-            logger.info(f"Notion 同步成功: {title} -> {page_id}")
-            self._save_history(media_data, page_id, "success")
+            # 检查 Notion 数据库中是否已存在
+            if self._skip_existing:
+                existing = self._notion_client.check_duplicate(title)
+                if existing:
+                    logger.info(f"跳过已存在条目: {title}")
+                    self._save_history(media_data, None, "skipped")
+                    # 记录到持久化存储，避免后续文件再次查询
+                    if unique_key:
+                        synced_keys[unique_key] = existing
+                        self.save_data('synced_keys', synced_keys)
+                    return
 
-            # 发送通知
-            if self._notify:
-                self.post_message(
-                    mtype=None,
-                    title="Notion媒体同步",
-                    text=f"已同步: {title}",
-                    image=media_data.get('poster')
-                )
-        else:
-            logger.error(f"Notion 同步失败: {title}")
-            self._save_history(media_data, None, "failed")
+            # 先记录到持久化存储（在创建之前，防止并发创建）
+            if unique_key:
+                synced_keys[unique_key] = "pending"
+                self.save_data('synced_keys', synced_keys)
+
+            # 构建 Notion 属性
+            properties = NotionClient.build_properties(media_data)
+
+            # 创建 Notion 页面
+            page_id = self._notion_client.create_page(properties)
+
+            if page_id:
+                logger.info(f"Notion 同步成功: {title} -> {page_id}")
+                self._save_history(media_data, page_id, "success")
+                # 更新持久化存储中的 page_id
+                if unique_key:
+                    synced_keys[unique_key] = page_id
+                    self.save_data('synced_keys', synced_keys)
+
+                # 发送通知
+                if self._notify:
+                    self.post_message(
+                        mtype=None,
+                        title="Notion媒体同步",
+                        text=f"已同步: {title}",
+                        image=media_data.get('poster')
+                    )
+            else:
+                logger.error(f"Notion 同步失败: {title}")
+                self._save_history(media_data, None, "failed")
+                # 创建失败，从持久化存储中移除
+                if unique_key and unique_key in synced_keys:
+                    del synced_keys[unique_key]
+                    self.save_data('synced_keys', synced_keys)
 
     @eventmanager.register(EventType.PluginAction)
     def on_plugin_action(self, event: Event):
@@ -542,7 +608,7 @@ class NotionMediaSync(_PluginBase):
             userid=event_data.get("user")
         )
 
-    def _build_media_data(self, mediainfo, transferinfo) -> Dict:
+    def _build_media_data(self, mediainfo, transferinfo, meta=None) -> Dict:
         """
         从 MoviePilot 媒体信息构建数据字典
         """
@@ -552,19 +618,49 @@ class NotionMediaSync(_PluginBase):
             data['title'] = mediainfo.title
             data['original_title'] = getattr(mediainfo, 'original_title', '')
             data['year'] = mediainfo.year
-            data['type'] = mediainfo.type.value if hasattr(mediainfo, 'type') else ''
+
+            # 动画类型判断 - 根据 TMDB genre_ids 识别动画 (16 = Animation)
+            genre_ids = getattr(mediainfo, 'genre_ids', []) or []
+            is_anime = 16 in genre_ids
+
+            if is_anime:
+                if hasattr(mediainfo, 'type') and mediainfo.type == MediaType.MOVIE:
+                    data['type'] = '动画电影'
+                else:
+                    data['type'] = '动画剧集'
+            else:
+                data['type'] = mediainfo.type.value if hasattr(mediainfo, 'type') else ''
+
             data['media_type'] = data['type']
             data['tmdb_id'] = mediainfo.tmdb_id
             data['vote_average'] = getattr(mediainfo, 'vote_average', None)
             data['overview'] = getattr(mediainfo, 'overview', '')
             data['poster'] = mediainfo.get_poster_image() if hasattr(mediainfo, 'get_poster_image') else ''
-            data['number_of_episodes'] = getattr(mediainfo, 'number_of_episodes', None)
             data['number_of_seasons'] = getattr(mediainfo, 'number_of_seasons', None)
-            data['source'] = 'TMDB'
+            data['data_source'] = 'TMDB'
 
-        if transferinfo:
-            # 可以从 transferinfo 获取更多信息
-            pass
+            # 获取当前季的集数（从 season_info 中查找）
+            season_num = getattr(meta, 'begin_season', 1) if meta else 1
+            season_episode_count = None
+            season_info = getattr(mediainfo, 'season_info', []) or []
+            for season in season_info:
+                if season.get('season_number') == season_num:
+                    season_episode_count = season.get('episode_count')
+                    break
+
+            # 优先使用当前季的集数，否则使用总集数
+            if season_episode_count:
+                data['number_of_episodes'] = season_episode_count
+            else:
+                data['number_of_episodes'] = getattr(mediainfo, 'number_of_episodes', None)
+
+        if meta:
+            data['resolution'] = getattr(meta, 'resource_pix', None)
+            data['video_codec'] = getattr(meta, 'video_encode', None)
+            data['audio_codec'] = getattr(meta, 'audio_encode', None)
+            data['source'] = getattr(meta, 'resource_type', None)
+            data['release_group'] = getattr(meta, 'resource_team', None)
+            data['season'] = getattr(meta, 'begin_season', None)
 
         return data
 

@@ -1055,5 +1055,22 @@
     "author": "cddjr",
     "level": 1,
     "v2": true
+  },
+  "NotionMediaSync": {
+    "name": "Notion媒体同步",
+    "description": "媒体整理完成后自动录入Notion数据库，支持技术信息同步和动画独立分类。",
+    "labels": "媒体库,Notion",
+    "version": "2.3.0",
+    "icon": "https://www.notion.so/images/favicon.ico",
+    "author": "media-library-manager",
+    "level": 1,
+    "v2": true,
+    "history": {
+      "v2.3.0": "修复多文件同步时创建重复记录的问题，新增清空同步记录API",
+      "v2.2.0": "修复集数显示错误，使用当前季的实际集数",
+      "v2.1.0": "新增持久化去重存储，防止重复同步",
+      "v2.0.0": "新增技术信息同步、动画独立分类、属性自动创建",
+      "v1.0.0": "初始版本，基础媒体信息同步"
+    }
   }
 }
